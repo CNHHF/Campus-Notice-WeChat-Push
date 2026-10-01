@@ -1,0 +1,5 @@
+' 开机自启推送桥（无黑窗）
+' 用法：复制本文件到「启动」文件夹（Win+R 输入 shell:startup），
+' 文件名改成 weixin-bridge.vbs，并把下面两条路径改成你机器上的实际路径。
+Set ws = CreateObject("WScript.Shell")
+ws.Run """C:\Program Files\Python312\python.exe"" ""C:\Users\YOURNAME\deploy-work\weixin-bridge\bridge.py""", 2, False

@@ -1,0 +1,14 @@
+{
+  "radar_base": "http://127.0.0.1:8765",
+  "radar_db": "C:/Users/YOURNAME/deploy-work/school-radar-pkg/school-radar/data/radar.db",
+  "openclaw_bin": "C:/Users/YOURNAME/AppData/Roaming/npm/openclaw.cmd",
+  "channel": "openclaw-weixin",
+  "target": "<你的微信会话ID>@im.wechat",
+  "interval_minutes": 15,
+  "min_score": 0.0,
+  "categories": [],
+  "quiet_hours": [],
+  "push_history_on_start": false,
+  "max_push_per_round": 0,
+  "send_interval_seconds": 1.2
+}

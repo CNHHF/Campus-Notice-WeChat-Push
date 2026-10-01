@@ -1,0 +1,8 @@
+# 本地运行时产生的文件，不要提交
+bridge/bridge-config.json
+sent-state.json
+bridge.log
+attachments/
+*.db
+__pycache__/
+*.pyc
