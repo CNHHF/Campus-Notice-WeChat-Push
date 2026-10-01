@@ -23,6 +23,8 @@ OpenClaw + 微信官方 openclaw-weixin 插件 ──▶ 你的微信
 - **要附件**：对 bot 说「把这条通知的报名表发我」，bot 下载后直接发文件给你
 - **随时重抓**：对 bot 说「重新抓一下官网最新通知」
 - 纯 Python 标准库实现（bridge / notice-tool 零第三方依赖），限速友好（15 分钟/轮）
+- **隐私**：教务处等站点要登录时，由使用者**本人提供自己的** Cookie（Cookie 绑定本人校园账号，
+  等于本人登录会话，勿用他人、勿共享）；Cookie 只存本机 `bridge-config.json`（已在 .gitignore，不进 git）
 
 ## 组成
 

@@ -63,7 +63,9 @@ python C:/Users/YOURNAME/deploy-work/weixin-bridge/notice-tool.py fetch 通知UR
 打印"⚠️ 该页面需要校园统一身份认证…"并以退出码 3 结束。此时**不要**说"没有附件"，
 按下面流程走：
 
-1. 把上面的登录提示（F12 取 Cookie 的步骤）转告用户，请他把浏览器里的 Cookie 整段发来。
+1. 把上面的登录提示（F12 取 Cookie 的步骤）转告用户，请他把**自己**浏览器里的 Cookie 整段发来。
+   ⚠️ Cookie 绑定本人校园账号（等于他本人的登录会话），必须由提问者自己发自己的；
+   不要用别人的 Cookie、不要代收转发、不要写进示例配置。
 2. 收到 Cookie 后保存（只存在本机 bridge-config.json）：
 
    ```bash
