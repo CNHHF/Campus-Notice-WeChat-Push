@@ -57,6 +57,36 @@ python C:/Users/YOURNAME/deploy-work/weixin-bridge/notice-tool.py fetch 通知UR
 
 如果 fetch 报"没有发现附件"，把通知里的说明（如"发送至邮箱 xxx"）转告用户。
 
+### 教务处等站点要登录（SSO）怎么办
+
+`jw.zufedfc.edu.cn`（教务处）在统一身份认证后面，匿名抓到的是登录页，所以 files/fetch 会
+打印"⚠️ 该页面需要校园统一身份认证…"并以退出码 3 结束。此时**不要**说"没有附件"，
+按下面流程走：
+
+1. 把上面的登录提示（F12 取 Cookie 的步骤）转告用户，请他把浏览器里的 Cookie 整段发来。
+2. 收到 Cookie 后保存（只存在本机 bridge-config.json）：
+
+   ```bash
+   python C:/Users/YOURNAME/deploy-work/weixin-bridge/notice-tool.py set-cookie jw.zufedfc.edu.cn "用户发来的Cookie整段"
+   ```
+
+3. 重新 `fetch` 同一 URL，成功后照常把附件绝对路径用 message 工具发给用户。
+4. Cookie 过期时（又报登录页/退出码 3），再向用户要一次新的即可。
+
+### 下载要验证码怎么办
+
+教务处的附件下载链接（download.jsp）会先弹"请输入验证码下载附件"。fetch 遇到时
+退出码 4，把验证码图片存到通知目录（输出里有「验证码图片:」路径）。此时：
+
+1. 用 message 工具把**验证码图片**发给用户，请他回复那 4 个字符。
+2. 收到后重试（--code 拼到下载链接上）：
+
+   ```bash
+   python C:/Users/YOURNAME/deploy-work/weixin-bridge/notice-tool.py fetch 通知URL --code 用户回复的验证码
+   ```
+
+3. 成功后照常把附件发给用户。验证码是一次性的，下次下载可能再要一次，重复本流程。
+
 ## 4. 与自动推送的关系
 
 - 微信里收到的 📢 通知推送是桥自动发的，只发**新增**通知；停机漏掉的开机后自动补发。

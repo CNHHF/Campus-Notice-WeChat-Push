@@ -29,7 +29,7 @@ OpenClaw + 微信官方 openclaw-weixin 插件 ──▶ 你的微信
 | 文件 | 作用 |
 |---|---|
 | `bridge/bridge.py` | 推送桥：定时抓取 → 对比 radar.db → 只推新增 → 调 openclaw 发微信 |
-| `bridge/notice-tool.py` | 按需工具：`search/show/files/fetch/refresh` 查历史、下载附件、触发重抓 |
+| `bridge/notice-tool.py` | 按需工具：`search/show/files/fetch/refresh/set-cookie` 查历史、下载附件、触发重抓（支持 SSO Cookie 与下载验证码 `--code`） |
 | `bridge/bridge-config.example.json` | 配置模板（复制为 `bridge-config.json` 后填写） |
 | `bridge/start-bridge.bat` | 一键启动推送桥 |
 | `skill/school-notice/SKILL.md` | OpenClaw 技能：教会 bot 查历史/发附件（装到 `~/.openclaw/workspace/skills/`） |

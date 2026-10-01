@@ -62,6 +62,25 @@ def load_db_path() -> Path:
     return Path(DEFAULT_DB)
 
 
+def load_site_cookies() -> dict:
+    """站点 Cookie（bridge-config.json 的 site_cookies 字段，host → Cookie 头）。"""
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        sc = cfg.get("site_cookies") or {}
+        return sc if isinstance(sc, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def cookie_for(url: str) -> str:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    for h, val in load_site_cookies().items():
+        h = h.lower()
+        if host == h or host.endswith("." + h):
+            return str(val)
+    return ""
+
+
 def connect_db() -> sqlite3.Connection:
     p = load_db_path()
     if not p.exists():
@@ -74,7 +93,11 @@ def connect_db() -> sqlite3.Connection:
 
 def http_get(url: str, timeout: float = 30.0):
     """GET，返回 (bytes, final_url, headers)。证书失败时退回不校验（公开站点）。"""
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    headers = {"User-Agent": UA}
+    ck = cookie_for(url)
+    if ck:
+        headers["Cookie"] = ck
+    req = urllib.request.Request(url, headers=headers)
     ctx = ssl.create_default_context()
     try:
         r = urllib.request.urlopen(req, timeout=timeout, context=ctx)
@@ -113,6 +136,63 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", name)
     name = name.strip(" .")
     return name[:120] or "attachment"
+
+
+LOGIN_TIP = (
+    "⚠️ 该页面需要校园统一身份认证（SSO）登录，匿名抓到的是登录页。\n"
+    "请在浏览器登录教务处后按下面步骤把 Cookie 给我（一次设置，之后都能抓）：\n"
+    "1. 浏览器打开教务处网站并确保已登录\n"
+    "2. 按 F12 → 网络(Network) → 刷新页面 → 点第一个请求\n"
+    "3. 在「请求标头」里找到 Cookie: 开头的一整行，复制等号后面全部内容发给我\n"
+    "我会保存后自动重试下载。"
+)
+
+
+def is_login_page(final_url: str, html: str) -> bool:
+    u = (final_url or "").lower()
+    if any(k in u for k in ("login", "cas.", "auth/sso", "unifyaccount", "idp.")):
+        return True
+    head = (html or "")[:4000]
+    return bool(re.search(r"统一身份认证|用户登录|SSO.?登录|<title>[^<]*login", head, re.I))
+
+
+def is_captcha_page(html: str) -> bool:
+    """金智 CMS 的「请输入验证码下载附件」中间页（download.jsp 带验证码）。"""
+    h = html or ""
+    return "createimage.jsp" in h and "codeValue" in h
+
+
+CAPTCHA_TIP = (
+    "⚠️ 该附件下载需要输入验证码（站点防爬）。\n"
+    "验证码图片已保存并发给你，看清后把 4 个字符回复给我，\n"
+    "我会用 fetch --code 重新下载。"
+)
+
+
+def grab_captcha(page_url: str, save_dir: Path) -> Path:
+    """下载当前会话的验证码图片到 save_dir，返回保存路径。"""
+    u = urllib.parse.urljoin(
+        page_url, "/system/resource/js/filedownload/createimage.jsp?randnum=" + str(time.time())
+    )
+    data, _final, headers = http_get(u, timeout=30.0)
+    ctype = ((headers.get("Content-Type") or "").lower() if headers else "")
+    if data[:4] == b"\x89PNG" or "png" in ctype:
+        name = "captcha.png"
+    elif data[:3] == b"\xff\xd8\xff" or "jpeg" in ctype or "jpg" in ctype:
+        name = "captcha.jpg"
+    else:
+        name = "captcha.gif"
+    path = save_dir / name
+    path.write_bytes(data)
+    return path
+
+
+def looks_like_html(data: bytes, headers) -> bool:
+    ctype = ((headers.get("Content-Type") or "").lower() if headers else "")
+    if "text/html" in ctype:
+        return True
+    head = data[:64].lstrip().lower()
+    return head.startswith(b"<!doctype") or head.startswith(b"<html")
 
 
 def row_to_item(r: sqlite3.Row) -> dict:
@@ -236,9 +316,11 @@ def cmd_show(args) -> int:
 # ---------------------------------------------------------------- 附件解析/下载
 
 def extract_attachments(page_url: str) -> list[dict]:
-    """抓通知页面，提取附件链接。返回 [{name, url}]。"""
+    """抓通知页面，提取附件链接。返回 [{name, url}]。需登录时抛 LOGIN_REQUIRED。"""
     data, final_url, headers = http_get(page_url)
     html = decode_html(data, headers)
+    if is_login_page(final_url, html):
+        raise RuntimeError("LOGIN_REQUIRED")
     out, seen = [], set()
     for m in re.finditer(
         r"<a\b[^>]*href\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", html, re.I | re.S
@@ -261,6 +343,12 @@ def extract_attachments(page_url: str) -> list[dict]:
 def cmd_files(args) -> int:
     try:
         atts = extract_attachments(args.url)
+    except RuntimeError as e:
+        if str(e) == "LOGIN_REQUIRED":
+            print(LOGIN_TIP, file=sys.stderr)
+            return 3
+        print(f"抓取页面失败: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"抓取页面失败: {e}", file=sys.stderr)
         return 1
@@ -292,6 +380,12 @@ def filename_from_response(resp_headers, fallback: str) -> str:
 def cmd_fetch(args) -> int:
     try:
         atts = extract_attachments(args.url)
+    except RuntimeError as e:
+        if str(e) == "LOGIN_REQUIRED":
+            print(LOGIN_TIP, file=sys.stderr)
+            return 3
+        print(f"抓取页面失败: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"抓取页面失败: {e}", file=sys.stderr)
         return 1
@@ -313,10 +407,31 @@ def cmd_fetch(args) -> int:
 
     saved = []
     for a in atts:
+        url = a["url"]
+        if args.code:
+            sep = "&" if "?" in url else "?"
+            url = url + sep + "codeValue=" + urllib.parse.quote(args.code.strip())
         try:
-            data, final_url, headers = http_get(a["url"], timeout=60.0)
+            data, final_url, headers = http_get(url, timeout=60.0)
         except Exception as e:
             print(f"⚠️ 下载失败: {a['name']} → {e}", file=sys.stderr)
+            continue
+        if looks_like_html(data, headers):
+            text = decode_html(data, headers)
+            if is_captcha_page(text):
+                try:
+                    cap = grab_captcha(a["url"], save_dir)
+                except Exception as e:
+                    print(f"⚠️ 验证码图片获取失败: {e}", file=sys.stderr)
+                    return 4
+                print(CAPTCHA_TIP, file=sys.stderr)
+                print(f"验证码图片: {cap}", file=sys.stderr)
+                print(f"下载命令: python {Path(__file__).name} fetch {args.url} --code 验证码", file=sys.stderr)
+                return 4
+            if is_login_page(final_url, text):
+                print(LOGIN_TIP, file=sys.stderr)
+                return 3
+            print(f"⚠️ {a['name']} 返回的不是文件（错误页），跳过", file=sys.stderr)
             continue
         name = filename_from_response(headers, a["name"])
         if not Path(name).suffix and FILE_EXT.search(a["url"]):
@@ -340,6 +455,21 @@ def cmd_fetch(args) -> int:
     print("\n保存位置（发给用户时用这些绝对路径）：")
     for s in saved:
         print(s["path"])
+    return 0
+
+
+# ---------------------------------------------------------------- set-cookie
+
+def cmd_set_cookie(args) -> int:
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        cfg = {}
+    sc = cfg.get("site_cookies") or {}
+    sc[args.host.strip()] = args.cookie.strip()
+    cfg["site_cookies"] = sc
+    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"已保存 {args.host} 的 Cookie（仅存本机 bridge-config.json，可随时删掉）")
     return 0
 
 
@@ -395,7 +525,13 @@ def main() -> int:
     p = sub.add_parser("fetch", help="下载附件")
     p.add_argument("url", help="通知 URL")
     p.add_argument("--out", default="", help=f"保存目录（默认 {DEFAULT_OUT}）")
+    p.add_argument("--code", default="", help="下载验证码（页面要求验证码时用）")
     p.set_defaults(func=cmd_fetch)
+
+    p = sub.add_parser("set-cookie", help="保存某站点的登录 Cookie（SSO 站点抓附件用）")
+    p.add_argument("host", help="站点域名，如 jw.zufedfc.edu.cn")
+    p.add_argument("cookie", help="浏览器复制的 Cookie 整段内容")
+    p.set_defaults(func=cmd_set_cookie)
 
     p = sub.add_parser("refresh", help="触发一次全量抓取")
     p.add_argument("--base", default="", help="school-radar 地址")
