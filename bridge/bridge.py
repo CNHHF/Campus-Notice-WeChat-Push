@@ -65,7 +65,21 @@ DEFAULT_CONFIG = {
     "max_push_per_round": 0,
     # 补发多条时的单条间隔（秒），避免发太快
     "send_interval_seconds": 1.2,
+    # 不自动推送这些分类（如 jobstart = 就业招聘）；空 = 不排除。要查这类信息随时问 bot
+    "exclude_categories": [],
+    # 标题含这些关键词的不自动推送（招聘、专业介绍等噪声）；空 = 不排除
+    "exclude_keywords": [],
+    # 等 openclaw 发送回执的超时（秒）。超时多半其实已送达——按已推送标记，防止下轮重发轰炸
+    "send_timeout_seconds": 90,
 }
+
+# 招聘/宣讲会/专业介绍这类信息的默认过滤规则。
+# 部署向导（--setup）会问要不要也自动推送；选“不推”就把下面写进配置。
+NOISE_CATEGORIES = ["jobstart"]
+NOISE_KEYWORDS = [
+    "招聘", "招募", "校园大使", "pick你的专业", "专业吧", "专业介绍",
+    "宣讲会", "双选会", "就业指导", "考公", "公考", "事业单位",
+]
 
 
 def log(msg: str) -> None:
@@ -93,6 +107,21 @@ def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
     cfg.update(load_json(CONFIG_PATH, {}) or {})
     return cfg
+
+
+def clear_pause_marker(cfg: dict) -> None:
+    """启动时清除临时停推标记 __paused_until_restart__。
+
+    更新代码时旧桥进程还在跑、手里的过滤规则是老的，会用老格式把通知推出来；
+    所以在 bridge-config.json 里把 categories 置为该标记让旧进程闭嘴，
+    新进程一启动就把它清掉恢复正常推送。"""
+    if "__paused_until_restart__" not in (cfg.get("categories") or []):
+        return
+    raw = load_json(CONFIG_PATH, {}) or {}
+    raw["categories"] = [c for c in (raw.get("categories") or []) if c != "__paused_until_restart__"]
+    save_json(CONFIG_PATH, raw)
+    cfg["categories"] = list(raw["categories"])
+    log("已清除临时停推标记，恢复正常推送")
 
 
 # ---------------------------------------------------------------- school-radar
@@ -163,6 +192,13 @@ def fetch_new_items(db_path: str, seen_urls: set, cfg: dict) -> list[dict]:
         cats = cfg.get("categories") or []
         if cats and (r["category"] or "") not in cats:
             continue
+        ex_cats = set(cfg.get("exclude_categories") or [])
+        if (r["category"] or "") in ex_cats:
+            continue
+        title = (r["title"] or "")
+        ex_kw = [k for k in (cfg.get("exclude_keywords") or []) if k]
+        if any(k in title for k in ex_kw):
+            continue
         out.append(dict(r))
     out.sort(key=lambda x: x.get("score") or 0, reverse=True)
     return out
@@ -171,10 +207,13 @@ def fetch_new_items(db_path: str, seen_urls: set, cfg: dict) -> list[dict]:
 # ------------------------------------------------------------------ 推送到微信
 
 def format_message(it: dict) -> str:
-    lines = [f"📢 {it.get('title') or '(无标题)'}"]
+    # openclaw.cmd 经 cmd.exe 传多行 --message 时换行会被截断（只剩第一行），
+    # 所以整条消息压成单行，链接一定带上，形如：
+    # 📢 标题 ｜ 🏷 标签 ｜ 📅 日期 ｜ 🔗 链接
+    parts = [f"📢 {it.get('title') or '(无标题)'}"]
     tags = [x for x in (it.get("category_name"), it.get("doc_type"), it.get("source_name")) if x]
     if tags:
-        lines.append("🏷 " + " · ".join(tags))
+        parts.append("🏷 " + " · ".join(tags))
     meta = []
     if it.get("pub_date"):
         meta.append(f"📅 {it['pub_date']}")
@@ -183,13 +222,13 @@ def format_message(it: dict) -> str:
     if it.get("audience"):
         meta.append(f"👥 {it['audience']}")
     if meta:
-        lines.append("  ".join(meta))
-    digest = (it.get("digest") or "").strip()
+        parts.append("  ".join(meta))
+    digest = (it.get("digest") or "").strip().replace("\n", " ")
     if digest:
-        lines.append(digest[:300] + ("…" if len(digest) > 300 else ""))
+        parts.append(digest[:120] + ("…" if len(digest) > 120 else ""))
     if it.get("url"):
-        lines.append(f"🔗 {it['url']}")
-    return "\n".join(lines)
+        parts.append(f"🔗 {it['url']}")
+    return " ｜ ".join(parts)
 
 
 def in_quiet_hours(quiet: list) -> bool:
@@ -226,11 +265,19 @@ def resolve_openclaw(cfg: dict) -> str:
     return name
 
 
-def send_wechat(cfg: dict, text: str) -> tuple[bool, str]:
-    """调 openclaw message send 发到微信。返回 (是否成功, 输出摘要)。"""
+def send_wechat(cfg: dict, text: str) -> tuple[str, str]:
+    """调 openclaw message send 发到微信。
+
+    返回 (状态, 输出摘要)，状态取值：
+      ok      —— 发送成功
+      timeout —— 等回执超时，消息多半其实已经发出去了；
+                 当作已送达处理（见 run_round），避免下一轮重发造成重复推送
+      fail    —— 明确失败，下一轮可以重试
+    """
     target = (cfg.get("target") or "").strip()
     if not target:
-        return False, "未配置 target（bridge-config.json）"
+        return "fail", "未配置 target（bridge-config.json）"
+    limit = float(cfg.get("send_timeout_seconds") or 90)
     cmd = [
         resolve_openclaw(cfg),
         "message", "send",
@@ -239,19 +286,19 @@ def send_wechat(cfg: dict, text: str) -> tuple[bool, str]:
         "--message", text,
     ]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=limit, encoding="utf-8", errors="replace")
     except FileNotFoundError:
-        return False, f"找不到命令 {cmd[0]!r}，请在 bridge-config.json 里配置 openclaw_bin 完整路径"
+        return "fail", f"找不到命令 {cmd[0]!r}，请在 bridge-config.json 里配置 openclaw_bin 完整路径"
     except subprocess.TimeoutExpired:
-        return False, "openclaw message send 超时(60s)"
+        return "timeout", f"openclaw message send 超时({int(limit)}s)"
     out = (r.stdout or "") + (r.stderr or "")
     if r.returncode == 0:
-        return True, out.strip()[:300]
+        return "ok", out.strip()[:300]
     # 微信 bot 平台要求：会话须由你先发一条消息开启（context token 随入站消息签发）。
     # 报 "prepare failed" 时提示用户去微信里给 bot 发条消息刷新会话。
     if "prepare failed" in out:
         out += " | 提示: 请在微信里给本 bot 随便发一条消息（如“你好”），刷新推送会话后即可恢复"
-    return False, out.strip()[:400]
+    return "fail", out.strip()[:400]
 
 
 # ---------------------------------------------------------------------- 主循环
@@ -268,6 +315,7 @@ def run_round(cfg: dict, state: dict, dry_run: bool) -> str:
     wait_crawl_done(base)
 
     seen = set(state.get("sent_urls") or [])
+    sent_titles = set(state.get("sent_titles") or [])
     first_round = not seen and not state.get("started_once")
     push_history = bool(cfg.get("push_history_on_start"))
 
@@ -275,7 +323,9 @@ def run_round(cfg: dict, state: dict, dry_run: bool) -> str:
     if first_round and not push_history:
         existing = fetch_new_items(cfg["radar_db"], set(), cfg)
         seen.update(it["url"] for it in existing)
+        sent_titles.update((it.get("title") or "").strip() for it in existing if (it.get("title") or "").strip())
         state["sent_urls"] = sorted(seen)
+        state["sent_titles"] = sorted(sent_titles)
         state["started_once"] = True
         state["last_round"] = datetime.now().isoformat(timespec="seconds")
         save_json(STATE_PATH, state)
@@ -304,39 +354,135 @@ def run_round(cfg: dict, state: dict, dry_run: bool) -> str:
     # 一次补发多条（如开机后补齐停机期间的）：先发一条说明再逐条发
     if not dry_run and not quiet and len(batch) >= 5:
         lead = f"📮 有 {len(batch)} 条新通知（含停机期间补发），现在逐条发给你："
-        ok, out = send_wechat(cfg, lead)
-        if not ok:
+        st, out = send_wechat(cfg, lead)
+        if st == "fail":
             log(f"补发说明推送失败: {out}")
 
     ok_count = 0
     for i, it in enumerate(batch):
         text = format_message(it)
+        title = it.get("title") or "(无标题)"
+        # 标题级去重：同一标题只推一次。抓取超时重试等场景会换 URL 复现同一条通知，
+        # 之前正是它造成重复推送（银行招聘那条发了两遍）
+        if title in sent_titles:
+            log(f"跳过（同标题已推送过）: {title}")
+            if not dry_run:
+                seen.add(it["url"])
+            continue
         if dry_run:
-            log(f"[dry-run] 将推送:\n{text}\n")
+            log(f"[dry-run] 将推送: {text}")
             ok_count += 1
         elif quiet:
-            log(f"免打扰时段，跳过推送: {it.get('title')}")
+            log(f"免打扰时段，跳过推送: {title}")
             continue
         else:
-            ok, out = send_wechat(cfg, text)
-            if ok:
+            st, out = send_wechat(cfg, text)
+            if st == "ok":
                 ok_count += 1
-                log(f"已推送: {it.get('title')}")
+                log(f"已推送: {title}")
                 if i < len(batch) - 1:
                     time.sleep(gap)
+            elif st == "timeout":
+                # 超时≠没送到。openclaw 发出去只是回执慢，多数情况消息已经到了；
+                # 此时必须记为已推送，否则下一轮重发就是重复轰炸。
+                # 万一真丢了，按需时说一声即可补查。
+                ok_count += 1
+                log(f"推送超时（按已送达处理，防重复）: {title}")
             else:
-                log(f"推送失败: {it.get('title')} → {out}")
+                log(f"推送失败: {title} → {out}")
                 # 失败不记入 sent，下一轮重试
                 continue
         if not dry_run:
             seen.add(it["url"])
+            sent_titles.add(title)
 
     state["sent_urls"] = sorted(seen)
+    state["sent_titles"] = sorted(sent_titles)
     state["started_once"] = True
     state["last_round"] = datetime.now().isoformat(timespec="seconds")
     save_json(STATE_PATH, state)
     log(f"本轮完成：成功 {ok_count}/{len(batch)}")
     return "ok"
+
+
+def backfill_titles(state: dict, cfg: dict) -> None:
+    """老状态只有 sent_urls 没有 sent_titles，从 radar.db 把已推 URL 的标题补回来。
+    否则同一条旧通知换个 URL 再出现时，标题去重拦不住它。"""
+    urls = state.get("sent_urls") or []
+    titles = set(state.get("sent_titles") or [])
+    if not urls or not cfg.get("radar_db"):
+        return
+    p = Path(cfg["radar_db"])
+    if not p.exists():
+        return
+    conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
+    try:
+        rows = conn.execute("SELECT url, title FROM items").fetchall()
+    finally:
+        conn.close()
+    want = set(urls)
+    changed = False
+    for url, title in rows:
+        t = (title or "").strip()
+        if url in want and t and t not in titles:
+            titles.add(t)
+            changed = True
+    if changed:
+        state["sent_titles"] = sorted(titles)
+        save_json(STATE_PATH, state)
+        log(f"标题去重已回填：共 {len(titles)} 个标题")
+
+
+def cmd_setup() -> int:
+    """部署向导：交互式生成 bridge-config.json（首次部署跑一次）。
+
+    会问几个问题（路径、target、要不要自动推送招聘/专业介绍等噪声），
+    答完直接写配置文件，之后正常启动即可。"""
+    if CONFIG_PATH.exists():
+        ans = input(f"{CONFIG_PATH} 已存在，覆盖重配？(y/N): ").strip().lower()
+        if ans != "y":
+            print("已取消，配置未改动。")
+            return 0
+
+    print("=== weixin-bridge 部署向导 ===")
+    print("直接回车用括号里的默认值。\n")
+
+    cfg = dict(DEFAULT_CONFIG)
+
+    v = input("radar.db 完整路径: ").strip()
+    if v:
+        cfg["radar_db"] = v
+
+    v = input(f"openclaw 可执行文件 ({cfg['openclaw_bin']}): ").strip()
+    if v:
+        cfg["openclaw_bin"] = v
+
+    v = input("微信会话 target（python bridge.py --targets 可查，如 xxx@im.wechat）: ").strip()
+    if v:
+        cfg["target"] = v
+
+    v = input(f"抓取+推送间隔分钟 ({cfg['interval_minutes']}): ").strip()
+    if v:
+        try:
+            cfg["interval_minutes"] = max(3, int(v))
+        except ValueError:
+            pass
+
+    print("\n以下信息要不要自动推送？")
+    print("  - 招聘/宣讲会/双选会/就业指导/考公类")
+    print("  - 专业介绍/专业选择类")
+    v = input("也推给我 (y/N，选 N 则这类信息不自动推送，需要时问 bot): ").strip().lower()
+    if v != "y":
+        cfg["exclude_categories"] = list(NOISE_CATEGORIES)
+        cfg["exclude_keywords"] = list(NOISE_KEYWORDS)
+        print("→ 已过滤这类信息（bridge-config.json 里可随时改 exclude_*）")
+    else:
+        print("→ 全部都推（可在 bridge-config.json 里配 exclude_* 过滤）")
+
+    save_json(CONFIG_PATH, cfg)
+    print(f"\n已写入 {CONFIG_PATH}")
+    print("下一步：python bridge.py --targets 核对 target，然后 python bridge.py --once --dry-run 试跑")
+    return 0
 
 
 def list_targets(cfg: dict) -> None:
@@ -350,14 +496,22 @@ def list_targets(cfg: dict) -> None:
 
 
 def main() -> int:
+    # Windows 控制台默认 GBK，打印 emoji 会崩；统一改 UTF-8 输出
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="school-radar → 微信推送桥")
+    ap.add_argument("--setup", action="store_true", help="首次部署向导（生成 bridge-config.json）")
     ap.add_argument("--once", action="store_true", help="只跑一轮")
     ap.add_argument("--dry-run", action="store_true", help="不真正发送，只打印")
     ap.add_argument("--reset-state", action="store_true", help="清空已推送记录")
     ap.add_argument("--targets", action="store_true", help="显示 openclaw 渠道状态（找 target 用）")
     args = ap.parse_args()
 
+    if args.setup:
+        return cmd_setup()
+
     cfg = load_config()
+    clear_pause_marker(cfg)
     if args.targets:
         list_targets(cfg)
         return 0
@@ -367,6 +521,7 @@ def main() -> int:
         log("已清空推送记录")
 
     state = load_json(STATE_PATH, {})
+    backfill_titles(state, cfg)
 
     if not cfg.get("radar_db"):
         log("bridge-config.json 里 radar_db 还没填（school-radar 的 data\\radar.db 路径）")

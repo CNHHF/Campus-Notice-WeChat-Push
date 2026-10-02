@@ -10,5 +10,8 @@
   "quiet_hours": [],
   "push_history_on_start": false,
   "max_push_per_round": 0,
-  "send_interval_seconds": 1.2
+  "send_interval_seconds": 1.2,
+  "exclude_categories": [],
+  "exclude_keywords": [],
+  "send_timeout_seconds": 90
 }

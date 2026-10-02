@@ -53,10 +53,16 @@ OpenClaw + 微信官方 openclaw-weixin 插件 ──▶ 你的微信
 
 ```powershell
 cd bridge
-copy bridge-config.example.json bridge-config.json
-notepad bridge-config.json   # 填 radar_db、openclaw_bin、target
+python bridge.py --setup     # 部署向导：问几个问题，生成 bridge-config.json
 python bridge.py --targets   # 查看你的微信会话 ID，填进 target（格式 xxx@im.wechat）
 ```
+
+向导会问：radar_db / openclaw_bin / target / 推送间隔，
+以及**「招聘、宣讲会、专业介绍这类信息要不要也自动推送？」**——
+选 N（默认）则这类信息不自动推送（需要时在微信里问 bot 照样能查）；
+选 y 则全部都推。之后可在 bridge-config.json 里改 `exclude_categories` / `exclude_keywords` 调整。
+
+也可以手动配置：复制 `bridge-config.example.json` 为 `bridge-config.json` 后按需填写。
 
 | 字段 | 说明 |
 |---|---|
@@ -67,6 +73,8 @@ python bridge.py --targets   # 查看你的微信会话 ID，填进 target（格
 | `max_push_per_round` | 单轮上限；**0 = 不限（开机补发全部）** |
 | `quiet_hours` | 免打扰时段，如 `[23, 7]`（期间只记不推） |
 | `categories` / `min_score` | 只推指定分类/相关度（空/0 = 全推） |
+| `exclude_categories` | 排除这些分类不自动推（如 `["jobstart"]` = 就业招聘类；部署向导可一键配好） |
+| `exclude_keywords` | 标题含这些关键词的不自动推（如 招聘/宣讲会/专业介绍 等，向导可一键配好） |
 
 ### 2. 测试并启动
 
