@@ -35,7 +35,7 @@ OpenClaw + 微信官方 openclaw-weixin 插件 ──▶ 你的微信
 | `bridge/bridge-config.example.json` | 配置模板（复制为 `bridge-config.json` 后填写） |
 | `bridge/start-bridge.bat` | 一键启动推送桥 |
 | `skill/school-notice/SKILL.md` | OpenClaw 技能：教会 bot 查历史/发附件（装到 `~/.openclaw/workspace/skills/`） |
-| `autostart/` | 开机自启脚本模板（VBS 启动桥 + 快捷方式启动 school-radar） |
+| `autostart/` | 启动方式模板：一键启动 `start-all.bat`；开机自启 / 桌面快捷方式 二选一 |
 | `patches/` | OpenClaw Windows 兼容补丁（bot 不回消息时看这里） |
 
 ## 快速开始
@@ -91,12 +91,30 @@ start-bridge.bat                    # 常驻：每 15 分钟抓取+推送
 把 `skill/school-notice/` 复制到 `~\.openclaw\workspace\skills\school-notice\`，
 并把 SKILL.md 里的路径改成你机器上的实际路径。之后在微信里直接说需求即可。
 
-### 4. 开机自启（可选）
+### 4. 启动方式（二选一：开机自启 / 桌面快捷方式）
+
+**A. 桌面快捷方式（手动启动，推荐）**
+
+1. 把 `autostart\start-all.bat` 复制到 `deploy-work\`（路径不对就改文件顶部的 `set` 行）
+2. 双击 `autostart\make-desktop-shortcut.vbs`，桌面生成 `Campus-Notice-Push`
+   快捷方式（可自行改名）
+3. 以后每次开机后**双击它**即可一键启动 OpenClaw 网关 + school-radar + 推送桥。
+   已在运行的部分会自动跳过，重复双击也安全
+
+选这个方式时，建议把 OpenClaw 网关的开机自启也停掉（避免开机自动双开网关）：
+
+```powershell
+schtasks /Change /TN "OpenClaw Gateway" /DISABLE   # 想恢复开机自启时换成 /ENABLE
+```
+
+**B. 开机自启（登录后自动运行）**
 
 - 推送桥：把 `autostart\weixin-bridge.vbs.example` 改好路径后复制到
   `shell:startup`（Win+R 输入 `shell:startup`），改名 `.vbs`
 - school-radar：用 `autostart\make-shortcut.vbs` 在启动文件夹生成快捷方式
-- OpenClaw 网关：安装时配好的登陆时计划任务，无需管
+- OpenClaw 网关：安装时配好的登录时计划任务，无需管
+
+> 两种方式选一种就好：都开的话，开机时会启动两遍（启动脚本会跳过已运行的，倒也不会出错）。
 
 ## 常见问题
 
